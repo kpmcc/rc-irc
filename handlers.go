@@ -8,20 +8,241 @@ import (
 	"sync"
 )
 
-func handleLUsers(ic *IRCConn, params string) {
-	if !validateParameters("LUSERS", params, 0, ic) {
-		return
+func userCanSetTopic(ic *IRCConn, ircCh *IRCChan) bool {
+	ircCh.Mtx.Lock()
+	tr := ircCh.isTopicRestricted
+	ircCh.Mtx.Unlock()
+	if tr {
+		return userIsChannelOp(ic, ircCh)
 	}
 
-	writeLUsers(ic)
+	return true
 }
 
-//func remove(s []int, i int) []int {
-//    s[i] = s[len(s)-1]
-//    return s[:len(s)-1]
-//}
+func setMemberStatusMode(nick, mode string, ircCh *IRCChan) (int, error) {
+	if ircCh == nil {
+		return -1, fmt.Errorf("setMemberStatusMode - ircCh is nil")
+	}
+	ircCh.Mtx.Lock()
+	defer ircCh.Mtx.Unlock()
+	modeChange := mode[0]
+	modeType := mode[1]
+	v := false
 
-func writeLUsers(ic *IRCConn) {
+	switch modeChange {
+	case '+':
+		v = true
+	case '-':
+		v = false
+	default:
+		return 2, fmt.Errorf("setMemberStatusMode - unknown modechange - %s", mode)
+	}
+
+	switch modeType {
+	case 'v':
+		ircCh.CanTalk[nick] = v
+	case 'o':
+		ircCh.OpNicks[nick] = v
+	default:
+		return 2, fmt.Errorf("setMemberStatusMode - unknown modetype - %s", mode)
+	}
+
+	return 0, nil
+}
+
+func userIsChannelOp(ic *IRCConn, ircCh *IRCChan) bool {
+	ircCh.Mtx.Lock()
+	defer ircCh.Mtx.Unlock()
+	isOp, ok := ircCh.OpNicks[ic.Nick]
+	return isOp && ok
+}
+
+func setChannelMode(ircCh *IRCChan, mode string) error {
+	if len(mode) != 2 {
+		return fmt.Errorf("setChannelMode - invalid mode")
+	}
+	modeChange := mode[0]
+	modeType := mode[1]
+	modeValue := false
+
+	switch modeChange {
+	case '+':
+		modeValue = true
+	case '-':
+		modeValue = false
+	default:
+		return fmt.Errorf("setChannelMode - invalid mode")
+	}
+
+	ircCh.Mtx.Lock()
+
+	switch modeType {
+	case 'm':
+		ircCh.isModerated = modeValue
+	case 't':
+		ircCh.isTopicRestricted = modeValue
+	default:
+		return fmt.Errorf("setChannelMode - invalid mode")
+	}
+	defer ircCh.Mtx.Unlock()
+
+	return nil
+}
+
+func getChannelMode(ircCh *IRCChan) (string, error) {
+	ircCh.Mtx.Lock()
+	channelMode := ""
+	if ircCh.isModerated {
+		channelMode += "m"
+	}
+	if ircCh.isTopicRestricted {
+		channelMode += "t"
+	}
+	defer ircCh.Mtx.Unlock()
+	return channelMode, nil
+}
+
+func handleMode(ic *IRCConn, im IRCMessage) error {
+	// target can be nick or channel
+	fmt.Println("in handleMode")
+	target := im.Params[0]
+	if strings.HasPrefix(target, "#") {
+		fmt.Println("target has prefix #")
+		// dealing with channel
+		chanName := target
+		ircCh, ok := lookupChannelByName(chanName)
+		if !ok {
+			msg, _ := formatReply(ic, replyMap["ERR_NOSUCHCHANNEL"], []string{chanName})
+			return sendMessage(ic, msg)
+			// channel doesn't exist
+		}
+		switch len(im.Params) {
+		case 1:
+			// Requesting channel mode
+			channelMode, _ := getChannelMode(ircCh)
+			msg := fmt.Sprintf(":%s!%s@%s 324 %s %s +%s\r\n", ic.Nick, ic.User, ic.Conn.LocalAddr(), ic.Nick, chanName, channelMode)
+			return sendMessage(ic, msg)
+		case 2:
+			// Modifying channel mode
+			fmt.Println("params has length 2")
+			mode := im.Params[1]
+			if userIsChannelOp(ic, ircCh) {
+				err := setChannelMode(ircCh, mode)
+				msg := ""
+				if err != nil {
+					modeChar := string(mode[1])
+					msg, _ = formatReply(ic, replyMap["ERR_UNKNOWNMODE"], []string{modeChar, chanName})
+				} else {
+					msg = fmt.Sprintf(":%s!%s@%s MODE %s %s\r\n", ic.Nick, ic.User, ic.Conn.LocalAddr(), chanName, mode)
+					sendMessageToChannel(ic, msg, ircCh, false)
+				}
+				return sendMessage(ic, msg)
+
+			} else {
+				fmt.Printf("handleMode - Handling else case in len im params 2\n")
+				msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
+				fmt.Printf("formatReply returned\n")
+				return sendMessage(ic, msg)
+			}
+		case 3:
+			fmt.Println("params has length 3")
+			// Modifying channelMemberStatus
+			mode := im.Params[1]
+			nick := im.Params[2]
+			// TODO check that sender can set modes
+			if !userIsChannelOp(ic, ircCh) {
+				msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
+				return sendMessage(ic, msg)
+			}
+			// check if user is in channel
+			ircCh.Mtx.Lock()
+			nickIsChannelMember := false
+			for _, v := range ircCh.Members {
+				if v.Nick == nick {
+					nickIsChannelMember = true
+					break
+				}
+			}
+			ircCh.Mtx.Unlock()
+			if !nickIsChannelMember {
+				msg, _ := formatReply(ic, replyMap["ERR_USERNOTINCHANNEL"], []string{nick, chanName})
+				return sendMessage(ic, msg)
+			}
+
+			fmt.Println("setting member status mode")
+			// set Mode
+			rv, err := setMemberStatusMode(nick, mode, ircCh)
+			if err != nil {
+				switch rv {
+				case 2:
+					modeChar := string(mode[1])
+					msg, _ := formatReply(ic, replyMap["ERR_UNKNOWNMODE"], []string{modeChar, chanName})
+					return sendMessage(ic, msg)
+				}
+			}
+
+			fmt.Println("sending message to channel")
+			rpl := fmt.Sprintf(":%s!%s@%s %s %s %s %s\r\n", ic.Nick, ic.User, ic.Conn.LocalAddr(), im.Command, im.Params[0], im.Params[1], im.Params[2])
+			sendMessageToChannel(ic, rpl, ircCh, true)
+
+		default: // invalid num params
+		}
+	} else {
+		// dealing with user nick
+		nick := target
+		if nick != ic.Nick {
+			msg, _ := formatReply(ic, replyMap["ERR_USERSDONTMATCH"], []string{})
+			return sendMessage(ic, msg)
+			// Send some error
+		}
+		mode := im.Params[1]
+		if len(mode) != 2 {
+			rpl, _ := replyMap["ERR_UMODEUNKNOWNFLAG"]
+			msg, _ := formatReply(ic, rpl, []string{})
+			return sendMessage(ic, msg)
+		}
+		modeChange := mode[0]
+		modeType := mode[1]
+		modeValue := false
+		switch modeChange {
+		case '+':
+			modeValue = true
+		case '-':
+			modeValue = false
+		default:
+			rpl, _ := replyMap["ERR_UMODEUNKNOWNFLAG"]
+			msg, _ := formatReply(ic, rpl, []string{})
+			return sendMessage(ic, msg)
+		}
+		switch modeType {
+		case 'o':
+			//return nil
+			//fmt.Println("Handling operator case")
+			//ic.isOperator = modeValue
+			if modeValue {
+				return nil
+			} else {
+				rpl := fmt.Sprintf(":%s %s %s :%s\r\n", ic.Nick, im.Command, im.Params[0], im.Params[1])
+				return sendMessage(ic, rpl)
+			}
+
+		case 'a':
+			return nil
+		default:
+			rpl, _ := replyMap["ERR_UMODEUNKNOWNFLAG"]
+			msg, _ := formatReply(ic, rpl, []string{})
+			return sendMessage(ic, msg)
+		}
+	}
+	return nil
+}
+
+func handleLUsers(ic *IRCConn, im IRCMessage) error {
+	writeLUsers(ic)
+	return nil
+}
+
+func writeLUsers(ic *IRCConn) error {
 	numServers, numServices, numOperators, numChannels := 1, 0, 0, 0
 	numUsers, numUnknownConnections, numClients := 0, 0, 0
 
@@ -54,28 +275,31 @@ func writeLUsers(ic *IRCConn) {
 	sb.WriteString(fmt.Sprintf(":%s 255 %s :I have %d clients and %d servers\r\n",
 		ic.Conn.LocalAddr(), ic.Nick, numClients, numServers))
 
-	_, err := ic.Conn.Write([]byte(sb.String()))
+	err := sendMessage(ic, sb.String())
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("writeLusers - %w", err)
 	}
+	return nil
 }
 
-func handleWhoIs(ic *IRCConn, params string) {
+func handleWhoIs(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 	targetNick := strings.Trim(params, " ")
 
 	if targetNick == "" {
-		return
+		return nil
 	}
 
 	targetIc, ok := lookupNickConn(targetNick)
 
 	if !ok {
-		msg := fmt.Sprintf(":%s 401 %s %s :No such nick/channel\r\n", ic.Conn.LocalAddr(), ic.Nick, targetNick)
-		_, err := ic.Conn.Write([]byte(msg))
+		rpl := replyMap["ERR_NOSUCHNICK"]
+		msg, _ := formatReply(ic, rpl, []string{targetNick})
+		err := sendMessage(ic, msg)
 		if err != nil {
-			log.Println("error sending nosuchnick reply")
+			return fmt.Errorf("whoIs - sending NOSUCHNICK - %w", err)
 		}
-		return
+		return nil
 	}
 
 	var sb strings.Builder
@@ -88,25 +312,27 @@ func handleWhoIs(ic *IRCConn, params string) {
 	sb.WriteString(fmt.Sprintf(":%s 318 %s %s :End of WHOIS list\r\n",
 		ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick))
 
-	_, err := ic.Conn.Write([]byte(sb.String()))
+	err := sendMessage(ic, sb.String())
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("whoIs - %w", err)
 	}
 
-	return
+	return nil
 }
 
-func handleDefault(ic *IRCConn, params, command string) {
+func handleDefault(ic *IRCConn, im IRCMessage) error {
+	command := im.Command
 	if command == "" || !ic.Welcomed {
-		return
+		return nil
 	}
 
-	msg := fmt.Sprintf(":%s 421 %s %s :Unknown command\r\n",
-		ic.Conn.LocalAddr(), ic.Nick, command)
-	_, err := ic.Conn.Write([]byte(msg))
+	rplName := "ERR_UNKNOWNCOMMAND"
+	msg, _ := formatReply(ic, replyMap[rplName], []string{command})
+	err := sendMessage(ic, msg)
 	if err != nil {
-		log.Println("error sending nosuchnick reply")
+		return fmt.Errorf("handleDefault - sending %s %w", rplName, err)
 	}
+	return nil
 }
 
 // Helper function to deal with the fact that nickToConn should be threadsafe
@@ -117,11 +343,12 @@ func lookupNickConn(nick string) (*IRCConn, bool) {
 	return recipientIc, ok
 }
 
-func handleNotice(ic *IRCConn, params string) {
+func handleNotice(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 	// TODO handle channels
 	splitParams := strings.SplitN(params, " ", 2)
 	if len(splitParams) < 2 {
-		return
+		return nil
 	}
 	targetNick, userMessage := splitParams[0], splitParams[1]
 
@@ -129,33 +356,35 @@ func handleNotice(ic *IRCConn, params string) {
 	recipientIc, ok := lookupNickConn(targetNick)
 
 	if !ok {
-		return
+		// TODO this should probably log something
+		return nil
 	}
 
 	msg := fmt.Sprintf(
-		":%s!%s@%s NOTICE %s %s\r\n",
+		":%s!%s@%s NOTICE %s :%s\r\n",
 		ic.Nick, ic.User, ic.Conn.RemoteAddr(), targetNick, userMessage)
-	_, err := recipientIc.Conn.Write([]byte(msg))
+	err := sendMessage(recipientIc, msg)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("handleNotice - %w", err)
 	}
-
+	return nil
 }
 
-func handleMotd(ic *IRCConn, params string) {
-	writeMotd(ic)
+func handleMotd(ic *IRCConn, im IRCMessage) error {
+	return writeMotd(ic)
 }
 
-func writeMotd(ic *IRCConn) {
+func writeMotd(ic *IRCConn) error {
 	dat, err := os.ReadFile("./motd.txt")
 	if err != nil {
-		msg := fmt.Sprintf(":%s 422 %s :MOTD File is missing\r\n",
-			ic.Conn.LocalAddr(), ic.Nick)
-		_, err := ic.Conn.Write([]byte(msg))
+		rplName := "ERR_NOMOTD"
+		rpl := replyMap[rplName]
+		msg, _ := formatReply(ic, rpl, []string{})
+		err := sendMessage(ic, msg)
 		if err != nil {
-			log.Fatal(err)
+			return fmt.Errorf("writeMotd - sending %s %w", rplName, err)
 		}
-		return
+		return nil
 	}
 	motd := string(dat)
 
@@ -175,45 +404,49 @@ func writeMotd(ic *IRCConn) {
 	sb.WriteString(fmt.Sprintf(":%s 376 %s :End of MOTD command\r\n",
 		ic.Conn.LocalAddr(), ic.Nick))
 
-	_, err = ic.Conn.Write([]byte(sb.String()))
+	err = sendMessage(ic, sb.String())
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("writeMotd - sending MOTD %w", err)
 	}
+	return nil
 }
 
-func handlePing(ic *IRCConn, params string) {
+func handlePing(ic *IRCConn, im IRCMessage) error {
 	// TODO validate welcome?
 	// TODO update ping to update connection lifetime?
 	msg := fmt.Sprintf("PONG %s\r\n", ic.Conn.LocalAddr().String())
-	_, err := ic.Conn.Write([]byte(msg))
+	err := sendMessage(ic, msg)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("handlePing - %w", err)
 	}
+	return nil
 }
 
-func handlePong(ic *IRCConn, params string) {
-	return
+func handlePong(ic *IRCConn, im IRCMessage) error {
+	return nil
 }
 
-func handlePrivMsg(ic *IRCConn, params string) {
-	if !validateParameters("PRIVMSG", params, 2, ic) {
-		return
-	}
+func handlePrivMsg(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 
 	splitParams := strings.SplitN(params, " ", 2)
 	target, userMessage := strings.Trim(splitParams[0], " "), splitParams[1]
 
 	if strings.HasPrefix(target, "#") {
+		// USER TO CHANNEL PM
+
 		// get connection from targetNick
 		channel, ok := lookupChannelByName(target)
 
 		if !ok {
-			msg := fmt.Sprintf(":%s 401 %s %s :No such nick/channel\r\n", ic.Conn.LocalAddr(), ic.Nick, target)
-			_, err := ic.Conn.Write([]byte(msg))
+			rplName := "ERR_NOSUCHNICK"
+			rpl := replyMap[rplName]
+			msg, _ := formatReply(ic, rpl, []string{target})
+			err := sendMessage(ic, msg)
 			if err != nil {
-				log.Println("error sending nosuchnick reply")
+				return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
 			}
-			return
+			return nil
 		}
 
 		memberOfChannel := false
@@ -224,37 +457,60 @@ func handlePrivMsg(ic *IRCConn, params string) {
 		}
 
 		if !memberOfChannel {
-			msg := fmt.Sprintf(":%s 404 %s %s :Cannot send to channel\r\n", ic.Conn.LocalAddr(), ic.Nick, target)
-			_, err := ic.Conn.Write([]byte(msg))
+			rplName := "ERR_CANNOTSENDTOCHAN"
+			msg, _ := formatReply(ic, replyMap[rplName], []string{target})
+			err := sendMessage(ic, msg)
 			if err != nil {
-				log.Println("error sending nosuchnick reply")
+				return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
 			}
-			return
+			return nil
+		}
+
+		if channel.isModerated {
+			fmt.Println("in channel isModerated block")
+			channel.Mtx.Lock()
+			senderCanTalk, ok := channel.CanTalk[ic.Nick]
+			channel.Mtx.Unlock()
+
+			if !(senderCanTalk && ok) {
+				fmt.Println("!senderCanTalk && ok")
+				rplName := "ERR_CANNOTSENDTOCHAN"
+				msg, _ := formatReply(ic, replyMap[rplName], []string{target})
+				err := sendMessage(ic, msg)
+				if err != nil {
+					return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
+				}
+			}
 		}
 
 		msg := fmt.Sprintf(
-			":%s!%s@%s PRIVMSG %s %s\r\n",
+			":%s!%s@%s PRIVMSG %s :%s\r\n",
 			ic.Nick, ic.User, ic.Conn.RemoteAddr(), target, userMessage)
 		if len(msg) > 512 {
 			msg = msg[:510] + "\r\n"
 		}
 
+		fmt.Printf("sending message to channel: %s", msg)
 		sendMessageToChannel(ic, msg, channel, false)
 	} else {
+		// USER TO USER PM
+
 		// get connection from targetNick
 		recipientIc, ok := lookupNickConn(target)
 
 		if !ok {
-			msg := fmt.Sprintf(":%s 401 %s %s :No such nick/channel\r\n", ic.Conn.LocalAddr(), ic.Nick, target)
-			_, err := ic.Conn.Write([]byte(msg))
+			rplName := "ERR_NOSUCHNICK"
+			rpl := replyMap[rplName]
+			msg, _ := formatReply(ic, rpl, []string{target})
+			err := sendMessage(ic, msg)
 			if err != nil {
-				log.Println("error sending nosuchnick reply")
+				return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
 			}
-			return
+			return nil
 		}
 
 		msg := fmt.Sprintf(
-			":%s!%s@%s PRIVMSG %s %s\r\n",
+			":%s!%s@%s PRIVMSG %s :%s\r\n",
 			ic.Nick, ic.User, ic.Conn.RemoteAddr(), target, userMessage)
 		if len(msg) > 512 {
 			msg = msg[:510] + "\r\n"
@@ -267,18 +523,17 @@ func handlePrivMsg(ic *IRCConn, params string) {
 		if recipientIc.AwayMessage != "" {
 			awayAutoReply := fmt.Sprintf(":%s!%s@%s 301 %s %s :%s\r\n",
 				recipientIc.Nick, recipientIc.User, recipientIc.Conn.RemoteAddr(), ic.Nick, recipientIc.Nick, recipientIc.AwayMessage)
-			_, err := ic.Conn.Write([]byte(awayAutoReply))
+			err := sendMessage(ic, awayAutoReply)
 			if err != nil {
-				log.Fatal(err)
+				return fmt.Errorf("handlePrivMsg - writing awayAutoReply - %w", err)
 			}
 		}
 	}
+	return nil
 }
 
-func handleQuit(ic *IRCConn, params string) {
-	if !validateParameters("QUIT", params, 0, ic) {
-		return
-	}
+func handleQuit(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 
 	quitMessage := "Client Quit"
 	if params != "" {
@@ -286,48 +541,49 @@ func handleQuit(ic *IRCConn, params string) {
 	}
 
 	msg := fmt.Sprintf("ERROR :Closing Link: %s (%s)\r\n", ic.Conn.RemoteAddr(), quitMessage)
-	_, err := ic.Conn.Write([]byte(msg))
+	err := sendMessage(ic, msg)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("handleQuit - sending closing link - %w", err)
 	}
 
-	nickToConnMtx.Lock()
-	delete(nickToConn, ic.Nick)
-	nickToConnMtx.Unlock()
+	cleanupIC(ic)
 
-	connsMtx.Lock()
-	for idx, conn := range ircConns {
-		if conn == ic {
-			ircConns = append(ircConns[:idx], ircConns[idx+1:]...)
-			break
-		}
-	}
-	connsMtx.Unlock()
+	//nickToConnMtx.Lock()
+	//delete(nickToConn, ic.Nick)
+	//nickToConnMtx.Unlock()
 
-	// TODO close gracefully, cleaup
+	//connsMtx.Lock()
+	//for idx, conn := range ircConns {
+	//	if conn == ic {
+	//		ircConns = append(ircConns[:idx], ircConns[idx+1:]...)
+	//		break
+	//	}
+	//}
+	//connsMtx.Unlock()
+
+	ic.isDeleted = true
 	err = ic.Conn.Close()
 	if err != nil {
-		log.Println(err)
+		return fmt.Errorf("handleQuit - Closing connection - %w", err)
 	}
+	return nil
 }
 
-func handleNick(ic *IRCConn, params string) {
-	if !validateParameters("NICK", params, 1, ic) {
-		return
-	}
+// CONTINUE FROM HERE
+func handleNick(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 
 	prevNick := ic.Nick
 	nick := strings.SplitN(params, " ", 2)[0]
 
 	_, nickInUse := lookupNickConn(nick)
 	if nick != ic.Nick && nickInUse { // TODO what happens if they try to change their own nick?
-		msg := fmt.Sprintf(":%s 433 * %s :Nickname is already in use\r\n",
-			ic.Conn.LocalAddr(), nick)
+		msg, _ := formatReply(ic, replyMap["ERR_NICKNAMEINUSE"], []string{nick})
 		_, err := ic.Conn.Write([]byte(msg))
 		if err != nil {
 			log.Fatal(err)
 		}
-		return
+		return nil
 	}
 
 	// if Nick has already been set
@@ -341,12 +597,11 @@ func handleNick(ic *IRCConn, params string) {
 	ic.Nick = nick
 
 	checkAndSendWelcome(ic)
+	return nil
 }
 
-func handleUser(ic *IRCConn, params string) {
-	if !validateParameters("USER", params, 4, ic) {
-		return
-	}
+func handleUser(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 
 	if ic.Welcomed && ic.User != "" {
 		msg := fmt.Sprintf(
@@ -357,7 +612,7 @@ func handleUser(ic *IRCConn, params string) {
 			log.Fatal(err)
 		}
 
-		return
+		return nil
 	}
 
 	splitParams := strings.SplitN(params, " ", 2)
@@ -370,12 +625,11 @@ func handleUser(ic *IRCConn, params string) {
 	}
 
 	checkAndSendWelcome(ic)
+	return nil
 }
 
-func handleTopic(ic *IRCConn, params string) {
-	if !validateParameters("TOPIC", params, 1, ic) {
-		return
-	}
+func handleTopic(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 
 	splitParams := strings.SplitN(params, " ", 2)
 
@@ -388,19 +642,13 @@ func handleTopic(ic *IRCConn, params string) {
 	ircCh, ok := lookupChannelByName(chanName)
 	if !ok {
 		// ERR Channel doesn't exist
-		//msg := fmt.Sprintf(":%s 403 %s %s :No such channel\r\n", ic.Conn.LocalAddr(), ic.Nick, chanName)
-		//_, err := ic.Conn.Write([]byte(msg))
-		//if err != nil {
-		//	log.Println("error sending nosuchnick reply")
-		//}
-		//return
 
-		msg := fmt.Sprintf(":%s 442 %s %s :You're not on that channel\r\n", ic.Conn.LocalAddr(), ic.Nick, chanName)
+		msg, _ := formatReply(ic, replyMap["ERR_NOTONCHANNEL"], []string{chanName}) // This is required by tests
 		_, err := ic.Conn.Write([]byte(msg))
 		if err != nil {
 			log.Println("error sending ERR_NOTONCHANNEL reply")
 		}
-		return
+		return nil
 	}
 
 	memberOfChannel := false
@@ -411,12 +659,17 @@ func handleTopic(ic *IRCConn, params string) {
 	}
 
 	if !memberOfChannel {
-		msg := fmt.Sprintf(":%s 442 %s %s :You're not on that channel\r\n", ic.Conn.LocalAddr(), ic.Nick, chanName)
+		msg, _ := formatReply(ic, replyMap["ERR_NOTONCHANNEL"], []string{chanName})
 		_, err := ic.Conn.Write([]byte(msg))
 		if err != nil {
 			log.Println("error sending ERR_NOTONCHANNEL reply")
 		}
-		return
+		return nil
+	}
+
+	if !userCanSetTopic(ic, ircCh) {
+		msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
+		return sendMessage(ic, msg)
 	}
 
 	ircCh.Mtx.Lock()
@@ -447,9 +700,11 @@ func handleTopic(ic *IRCConn, params string) {
 			log.Println("error sending TOPIC reply")
 		}
 	}
+	return nil
 }
 
-func handleAway(ic *IRCConn, params string) {
+func handleAway(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 	awayMessage := removePrefix(strings.Trim(params, " "))
 	var msg string
 	if awayMessage == "" {
@@ -464,6 +719,7 @@ func handleAway(ic *IRCConn, params string) {
 	if err != nil {
 		log.Println("error sending AWAY reply")
 	}
+	return nil
 }
 
 func lookupChannelByName(name string) (*IRCChan, bool) {
@@ -504,15 +760,18 @@ func addUserToChannel(ic *IRCConn, ircCh *IRCChan) {
 	}
 }
 
+// TODO need to clean up cantalk and opnick status when user leaves channel
 func newChannel(ic *IRCConn, chanName string) *IRCChan {
 	newChan := IRCChan{
 		Mtx:     sync.Mutex{},
 		Name:    chanName,
 		Topic:   "",
 		OpNicks: make(map[string]bool),
+		CanTalk: make(map[string]bool),
 		Members: []*IRCConn{},
 	}
 	newChan.OpNicks[ic.Nick] = true
+	newChan.CanTalk[ic.Nick] = true
 	chansMtx.Lock()
 	ircChans = append(ircChans, &newChan)
 	chansMtx.Unlock()
@@ -583,21 +842,19 @@ func sendNamReply(ic *IRCConn, ircCh *IRCChan) {
 	}
 }
 
-func handlePart(ic *IRCConn, params string) {
-	if !validateParameters("PART", params, 1, ic) {
-		return
-	}
+func handlePart(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 	splitParams := strings.SplitN(params, " ", 2) // maybe split on colon?
 	chanName := splitParams[0]
 	ircCh, ok := lookupChannelByName(chanName)
 	if !ok {
 		// ERR Channel doesn't exist
-		msg := fmt.Sprintf(":%s 403 %s %s :No such channel\r\n", ic.Conn.LocalAddr(), ic.Nick, chanName)
+		msg, _ := formatReply(ic, replyMap["ERR_NOSUCHCHANNEL"], []string{chanName})
 		_, err := ic.Conn.Write([]byte(msg))
 		if err != nil {
 			log.Println("error sending nosuchnick reply")
 		}
-		return
+		return nil
 	}
 
 	memberOfChannel := false
@@ -608,12 +865,12 @@ func handlePart(ic *IRCConn, params string) {
 	}
 
 	if !memberOfChannel {
-		msg := fmt.Sprintf(":%s 442 %s %s :You're not on that channel\r\n", ic.Conn.LocalAddr(), ic.Nick, chanName)
+		msg, _ := formatReply(ic, replyMap["ERR_NOTONCHANNEL"], []string{chanName})
 		_, err := ic.Conn.Write([]byte(msg))
 		if err != nil {
 			log.Println("error sending ERR_NOTONCHANNEL reply")
 		}
-		return
+		return nil
 	}
 
 	msg := ""
@@ -662,12 +919,11 @@ func handlePart(ic *IRCConn, params string) {
 		chansMtx.Unlock()
 		nameToChanMtx.Unlock()
 	}
+	return nil
 }
 
-func handleJoin(ic *IRCConn, params string) {
-	if !validateParameters("JOIN", params, 1, ic) {
-		return
-	}
+func handleJoin(ic *IRCConn, im IRCMessage) error {
+	params := strings.Join(im.Params, " ")
 	chanName := params
 
 	ircCh, ok := lookupChannelByName(chanName)
@@ -679,7 +935,7 @@ func handleJoin(ic *IRCConn, params string) {
 	members := getChannelMembers(ircCh)
 	for _, v := range members {
 		if v == ic {
-			return
+			return nil
 		}
 	}
 	// Join channel
@@ -688,9 +944,10 @@ func handleJoin(ic *IRCConn, params string) {
 	sendTopicReply(ic, ircCh)
 	// RPL_NAMREPLY & RPL_ENDOFNAMES
 	sendNamReply(ic, ircCh)
+	return nil
 }
 
-func handleList(ic *IRCConn, params string) {
+func handleList(ic *IRCConn, im IRCMessage) error {
 	var sb strings.Builder
 	chansMtx.Lock()
 	for _, ircChan := range ircChans {
@@ -707,6 +964,7 @@ func handleList(ic *IRCConn, params string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	return nil
 }
 
 func checkAndSendWelcome(ic *IRCConn) {
