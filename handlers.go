@@ -50,6 +50,15 @@ func setMemberStatusMode(nick, mode string, ircCh *IRCChan) (int, error) {
 	return 0, nil
 }
 
+func userHasVoice(ic *IRCConn, ircCh *IRCChan) bool {
+	ircCh.Mtx.Lock()
+	defer ircCh.Mtx.Unlock()
+	im := ircCh.isModerated
+	ct, ok := ircCh.CanTalk[ic.Nick]
+	return im && (ct && ok)
+
+}
+
 func userIsChannelOp(ic *IRCConn, ircCh *IRCChan) bool {
 	ircCh.Mtx.Lock()
 	defer ircCh.Mtx.Unlock()
@@ -302,12 +311,28 @@ func handleWhoIs(ic *IRCConn, im IRCMessage) error {
 		return nil
 	}
 
+	channelList := getConnectionChannels(targetIc)
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(":%s 311 %s %s %s %s * :%s\r\n",
 		ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick, targetIc.User, targetIc.Conn.RemoteAddr().String(), targetIc.RealName))
 
+	if channelList != "" {
+		sb.WriteString(fmt.Sprintf(":%s 319 %s %s :%s\r\n",
+			ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick, channelList))
+	}
+
+	// RPL_WHOISSERVER
 	sb.WriteString(fmt.Sprintf(":%s 312 %s %s %s :%s\r\n",
 		ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick, targetIc.Conn.LocalAddr().String(), "<server info>"))
+
+	// RPL_AWAY
+	//sb.WriteString(fmt.Sprintf(":%s 301 %s %s %s :%s\r\n",
+	//	ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick, targetIc.Conn.LocalAddr().String(), "<server info>"))
+
+	// RPL_WHOISOPERATOR
+	//sb.WriteString(fmt.Sprintf(":%s 313 %s %s %s :%s\r\n",
+	//	ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick, targetIc.Conn.LocalAddr().String(), "<server info>"))
 
 	sb.WriteString(fmt.Sprintf(":%s 318 %s %s :End of WHOIS list\r\n",
 		ic.Conn.LocalAddr(), ic.Nick, targetIc.Nick))
@@ -798,6 +823,31 @@ func sendTopicReply(ic *IRCConn, ircCh *IRCChan) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func getConnectionChannels(ic *IRCConn) string {
+	memberChannels := ""
+	chansMtx.Lock()
+	for _, c := range ircChans {
+		// isMember locks the corresponding channel's mutex
+		// this should be okay b/c the ordering of mutex acquisition is
+		// always chansMtx, then channel specific mtx
+
+		mem := c.isMember(ic)
+		op := userIsChannelOp(ic, c)
+		v := userHasVoice(ic, c)
+		if mem {
+			if op {
+				memberChannels += "@"
+			}
+			if v {
+				memberChannels += "+"
+			}
+			memberChannels += c.Name + " "
+		}
+	}
+	defer chansMtx.Unlock()
+	return memberChannels
 }
 
 func getChannelMembers(ircCh *IRCChan) []*IRCConn {

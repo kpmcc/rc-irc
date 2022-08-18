@@ -26,7 +26,7 @@ var (
 	nickToConnMtx    = sync.Mutex{}
 	nameToChanMtx    = sync.Mutex{}
 	connsMtx         = sync.Mutex{}
-	chansMtx         = sync.Mutex{}
+	chansMtx         = sync.RWMutex{}
 	ircConns         = []*IRCConn{}
 	ircChans         = []*IRCChan{}
 	timeCreated      = time.Now().Format(layoutUS)
@@ -290,6 +290,17 @@ type IRCChan struct {
 	Members           []*IRCConn
 	isModerated       bool
 	isTopicRestricted bool
+}
+
+func (c *IRCChan) isMember(ic *IRCConn) bool {
+	c.Mtx.Lock()
+	defer c.Mtx.Unlock()
+	for _, m := range c.Members {
+		if ic == m {
+			return true
+		}
+	}
+	return false
 }
 
 type IRCCommand struct {
