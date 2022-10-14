@@ -127,6 +127,12 @@ var (
 			disableAutoReply: false,
 			welcomeRequired:  true,
 		},
+		"NAMES": {
+			handler:          handleNames,
+			minParams:        0,
+			disableAutoReply: false,
+			welcomeRequired:  true,
+		},
 	}
 	replyMap = map[string]*IRCReply{
 		"ERR_NOSUCHNICK": {

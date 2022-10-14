@@ -884,12 +884,15 @@ func sendNamReply(ic *IRCConn, ircCh *IRCChan) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
 
-	endOfNames := fmt.Sprintf(":%s %03d %s %s :End of NAMES list\r\n", ic.Conn.LocalAddr(), 366, ic.Nick, ircCh.Name)
-	_, err = ic.Conn.Write([]byte(endOfNames))
+func sendEndOfNames(ic *IRCConn, chanName string) error {
+	endOfNames := fmt.Sprintf(":%s %03d %s %s :End of NAMES list\r\n", ic.Conn.LocalAddr(), 366, ic.Nick, chanName)
+	_, err := ic.Conn.Write([]byte(endOfNames))
 	if err != nil {
 		log.Fatal(err)
 	}
+	return nil
 }
 
 func handlePart(ic *IRCConn, im IRCMessage) error {
@@ -992,8 +995,10 @@ func handleJoin(ic *IRCConn, im IRCMessage) error {
 	addUserToChannel(ic, ircCh)
 	// RPL_TOPIC
 	sendTopicReply(ic, ircCh)
-	// RPL_NAMREPLY & RPL_ENDOFNAMES
+	// RPL_NAMREPLY
 	sendNamReply(ic, ircCh)
+	// RPL_ENDOFNAMES
+	sendEndOfNames(ic, ircCh.Name)
 	return nil
 }
 
@@ -1066,4 +1071,55 @@ func checkAndSendWelcome(ic *IRCConn) {
 		writeLUsers(ic)
 		writeMotd(ic)
 	}
+}
+
+func handleNames(ic *IRCConn, im IRCMessage) error {
+	l := len(im.Params)
+	if l == 0 {
+		// list all channels
+		connsMtx.Lock()
+		var conns []*IRCConn
+		copy(conns, ircConns)
+		connsMtx.Unlock()
+		m := make(map[*IRCConn]bool)
+		for _, c := range conns {
+			m[c] = true
+		}
+
+		allMembers := []*IRCConn{}
+		chansMtx.Lock()
+		for _, c := range ircChans {
+			sendNamReply(ic, c)
+			chanMembers := getChannelMembers(c)
+			for _, m := range chanMembers {
+				allMembers = append(allMembers, m)
+			}
+		}
+		chansMtx.Unlock()
+
+		for _, c := range allMembers {
+			_, ok := m[c]
+			if ok {
+				delete(m, c)
+			}
+		}
+		s := ""
+		for c, _ := range m {
+			s += c.Nick
+		}
+		log.Printf("conns w/o channels: %s", s)
+
+	} else if l == 1 {
+		// list names on channel
+		chanName := im.Params[0]
+		ircCh, ok := lookupChannelByName(chanName)
+		if ok {
+			sendNamReply(ic, ircCh)
+		}
+
+	} else {
+		// unsupported
+
+	}
+	return nil
 }
