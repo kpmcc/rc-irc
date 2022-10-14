@@ -17,12 +17,6 @@ const (
 )
 
 // TODO - handle improperly closed connections cleanly
-//
-type serverStats struct {
-	NumClients            uint
-	NumUsers              uint
-	NumUnknownConnections uint
-}
 
 var (
 	port             = flag.String("p", "8080", "http service address")
@@ -36,8 +30,6 @@ var (
 	ircConns         = []*IRCConn{}
 	ircChans         = []*IRCChan{}
 	timeCreated      = time.Now().Format(layoutUS)
-	stats            = serverStats{NumClients: 0, NumUsers: 0, NumUnknownConnections: 0}
-	statsMtx         = sync.Mutex{}
 	commandMap       = map[string]*IRCCommand{
 		"NICK": {
 			handler:          handleNick,
@@ -347,17 +339,6 @@ func sendMessage(ic *IRCConn, msg string) error {
 	return nil
 }
 
-func newIRCConn(conn net.Conn) *IRCConn {
-	ircConn := IRCConn{Conn: conn, Nick: "*"}
-	statsMtx.Lock()
-	connsMtx.Lock()
-	defer connsMtx.Unlock()
-	defer statsMtx.Unlock()
-	ircConns = append(ircConns, &ircConn)
-	stats.NumUnknownConnections += 1
-	return &ircConn
-}
-
 func main() {
 	flag.Parse()
 
@@ -379,7 +360,11 @@ func main() {
 				return
 			}
 
-			ircConn := newIRCConn(conn)
+			ircConn := &IRCConn{Conn: conn, Nick: "*"}
+			connsMtx.Lock()
+			ircConns = append(ircConns, ircConn)
+			connsMtx.Unlock()
+
 			go handleConnection(ircConn)
 		}
 	}()
@@ -453,6 +438,7 @@ func handleConnection(ic *IRCConn) {
 	defer func() {
 		ic.Conn.Close()
 
+		// TODO Refactor into cleanup function
 		if !ic.isDeleted {
 			cleanupIC(ic)
 		}
@@ -489,9 +475,11 @@ func handleConnection(ic *IRCConn) {
 		}
 
 		command := split_message[0]
+
 		ircCommand, ok := commandMap[command]
 		if !ok {
-			log.Printf("Could not find command %s in commandMap, handling as default\n", command)
+			log.Println("not ok")
+			//handleDefault(ic, params, command)
 			handleDefault(ic, im)
 			continue
 		}
@@ -509,7 +497,6 @@ func handleConnection(ic *IRCConn) {
 	// BUG
 	// Need to remove ic from nickToConn, all channels, etc, in case of
 	// messy disconnect (i.e. no quit no part)
-	// deal with this in cleanupIC
 	err := scanner.Err()
 	if err != nil {
 		log.Printf("ERR: %v\n", err)

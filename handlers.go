@@ -255,23 +255,18 @@ func writeLUsers(ic *IRCConn) error {
 	numServers, numServices, numOperators, numChannels := 1, 0, 0, 0
 	numUsers, numUnknownConnections, numClients := 0, 0, 0
 
-	statsMtx.Lock()
-	defer statsMtx.Unlock()
-	numUsers = int(stats.NumUsers)
-	numUnknownConnections = int(stats.NumUnknownConnections)
-	numClients = int(stats.NumClients)
-	//connsMtx.Lock()
-	//for _, conn := range ircConns {
-	//	if conn.Welcomed {
-	//		numUsers++
-	//		numClients++
-	//	} else if conn.Nick != "*" || conn.User != "" {
-	//		numClients++
-	//	} else {
-	//		numUnknownConnections++
-	//	}
-	//}
-	//connsMtx.Unlock()
+	connsMtx.Lock()
+	for _, conn := range ircConns {
+		if conn.Welcomed {
+			numUsers++
+			numClients++
+		} else if conn.Nick != "*" || conn.User != "" {
+			numClients++
+		} else {
+			numUnknownConnections++
+		}
+	}
+	connsMtx.Unlock()
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(":%s 251 %s :There are %d users and %d services on %d servers\r\n",
@@ -620,13 +615,6 @@ func handleNick(ic *IRCConn, im IRCMessage) error {
 	nickToConnMtx.Lock()
 	if prevNick != "*" {
 		delete(nickToConn, prevNick)
-	} else {
-		if ic.User == "" {
-			statsMtx.Lock()
-			defer statsMtx.Unlock()
-			stats.NumClients += 1
-			stats.NumUnknownConnections -= 1
-		}
 	}
 
 	nickToConn[nick] = ic
@@ -650,14 +638,6 @@ func handleUser(ic *IRCConn, im IRCMessage) error {
 		}
 
 		return nil
-	}
-	if ic.User != "" {
-		if ic.Nick == "*" {
-			statsMtx.Lock()
-			defer statsMtx.Unlock()
-			stats.NumUnknownConnections -= 1
-			stats.NumClients += 1
-		}
 	}
 
 	splitParams := strings.SplitN(params, " ", 2)
@@ -1048,11 +1028,7 @@ func checkAndSendWelcome(ic *IRCConn) {
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		statsMtx.Lock()
-		stats.NumUsers += 1
 		ic.Welcomed = true
-		statsMtx.Unlock()
 
 		// RPL_YOURHOST
 		msg = fmt.Sprintf(
