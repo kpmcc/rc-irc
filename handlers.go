@@ -113,7 +113,6 @@ func getChannelMode(ircCh *IRCChan) (string, error) {
 
 func handleMode(ic *IRCConn, im IRCMessage) error {
 	// target can be nick or channel
-	fmt.Println("in handleMode")
 	target := im.Params[0]
 	if strings.HasPrefix(target, "#") {
 		fmt.Println("target has prefix #")
@@ -121,9 +120,9 @@ func handleMode(ic *IRCConn, im IRCMessage) error {
 		chanName := target
 		ircCh, ok := lookupChannelByName(chanName)
 		if !ok {
+			// channel doesn't exist
 			msg, _ := formatReply(ic, replyMap["ERR_NOSUCHCHANNEL"], []string{chanName})
 			return sendMessage(ic, msg)
-			// channel doesn't exist
 		}
 		switch len(im.Params) {
 		case 1:
@@ -133,26 +132,7 @@ func handleMode(ic *IRCConn, im IRCMessage) error {
 			return sendMessage(ic, msg)
 		case 2:
 			// Modifying channel mode
-			fmt.Println("params has length 2")
-			mode := im.Params[1]
-			if userIsChannelOp(ic, ircCh) {
-				err := setChannelMode(ircCh, mode)
-				msg := ""
-				if err != nil {
-					modeChar := string(mode[1])
-					msg, _ = formatReply(ic, replyMap["ERR_UNKNOWNMODE"], []string{modeChar, chanName})
-				} else {
-					msg = fmt.Sprintf(":%s!%s@%s MODE %s %s\r\n", ic.Nick, ic.User, ic.Conn.LocalAddr(), chanName, mode)
-					sendMessageToChannel(ic, msg, ircCh, false)
-				}
-				return sendMessage(ic, msg)
-
-			} else {
-				fmt.Printf("handleMode - Handling else case in len im params 2\n")
-				msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
-				fmt.Printf("formatReply returned\n")
-				return sendMessage(ic, msg)
-			}
+			return handleChannelModeChange(im, ic, ircCh)
 		case 3:
 			fmt.Println("params has length 3")
 			// Modifying channelMemberStatus
@@ -573,19 +553,6 @@ func handleQuit(ic *IRCConn, im IRCMessage) error {
 
 	cleanupIC(ic)
 
-	//nickToConnMtx.Lock()
-	//delete(nickToConn, ic.Nick)
-	//nickToConnMtx.Unlock()
-
-	//connsMtx.Lock()
-	//for idx, conn := range ircConns {
-	//	if conn == ic {
-	//		ircConns = append(ircConns[:idx], ircConns[idx+1:]...)
-	//		break
-	//	}
-	//}
-	//connsMtx.Unlock()
-
 	ic.isDeleted = true
 	err = ic.Conn.Close()
 	if err != nil {
@@ -596,10 +563,11 @@ func handleQuit(ic *IRCConn, im IRCMessage) error {
 
 // CONTINUE FROM HERE
 func handleNick(ic *IRCConn, im IRCMessage) error {
-	params := strings.Join(im.Params, " ")
+	//params := strings.Join(im.Params, " ")
 
 	prevNick := ic.Nick
-	nick := strings.SplitN(params, " ", 2)[0]
+	//nick := strings.SplitN(params, " ", 2)[0]
+	nick := im.Params[0]
 
 	_, nickInUse := lookupNickConn(nick)
 	if nick != ic.Nick && nickInUse { // TODO what happens if they try to change their own nick?
@@ -859,6 +827,27 @@ func getChannelMembers(ircCh *IRCChan) []*IRCConn {
 	return members
 }
 
+func sendNoChannelNamReply(ic *IRCConn, names []string) {
+	var sb strings.Builder
+	channelStatusIndicator := "=" // Using public indicator as default
+	sb.WriteString(fmt.Sprintf(":%s %03d %s %s %s :", ic.Conn.LocalAddr(), 353, ic.Nick,
+		channelStatusIndicator, "*"))
+	members := names
+	for i, v := range members {
+		if i != 0 {
+			sb.WriteString(" ")
+		}
+		// append channel member nick
+		sb.WriteString(v)
+	}
+	sb.WriteString("\r\n")
+	// Send RPL_NAMREPLY
+	_, err := ic.Conn.Write([]byte(sb.String()))
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 func sendNamReply(ic *IRCConn, ircCh *IRCChan) {
 	var sb strings.Builder
 	channelStatusIndicator := "=" // Using public indicator as default
@@ -1078,11 +1067,12 @@ func handleNames(ic *IRCConn, im IRCMessage) error {
 	if l == 0 {
 		// list all channels
 		connsMtx.Lock()
-		var conns []*IRCConn
+		var conns = make([]*IRCConn, len(ircConns))
 		copy(conns, ircConns)
 		connsMtx.Unlock()
 		m := make(map[*IRCConn]bool)
 		for _, c := range conns {
+			log.Printf("adding %s to conns map\n", c.Nick)
 			m[c] = true
 		}
 
@@ -1101,14 +1091,15 @@ func handleNames(ic *IRCConn, im IRCMessage) error {
 			_, ok := m[c]
 			if ok {
 				delete(m, c)
+				log.Printf("removing %s from conns map\n", c.Nick)
 			}
 		}
-		s := ""
+		log.Printf("%d connections without channels", len(m))
+		var channelLessConns = []string{}
 		for c, _ := range m {
-			s += c.Nick
+			channelLessConns = append(channelLessConns, c.Nick)
 		}
-		log.Printf("conns w/o channels: %s", s)
-
+		sendNoChannelNamReply(ic, channelLessConns)
 	} else if l == 1 {
 		// list names on channel
 		chanName := im.Params[0]

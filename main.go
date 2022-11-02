@@ -309,6 +309,67 @@ func (c *IRCChan) isMember(ic *IRCConn) bool {
 	return false
 }
 
+type ModeType uint8
+
+const (
+	Moderated ModeType = iota
+	TopicRestricted
+	Invalid
+)
+
+func getModeType(m string) (ModeType, bool, bool) {
+	if len(m) != 2 {
+		return Invalid, false, false
+	}
+
+	operation := m[0]
+	parameter := m[1]
+
+	var modeValue bool = false
+	var t ModeType = Invalid
+	var ok bool = true
+
+	switch parameter {
+	case 'm':
+		t = Moderated
+	case 't':
+		t = TopicRestricted
+	default:
+		t = Invalid
+		ok = false
+	}
+
+	switch operation {
+	case '+':
+		modeValue = true
+	case '-':
+		modeValue = false
+	default:
+		modeValue = false
+		t = Invalid
+		ok = false
+	}
+
+	return t, modeValue, ok
+}
+
+func (c *IRCChan) setMode(m ModeType, v bool) bool {
+	c.Mtx.Lock()
+	defer c.Mtx.Unlock()
+	rv := v
+	switch m {
+	case Moderated:
+		c.isModerated = v
+		rv = c.isModerated
+	case TopicRestricted:
+		c.isTopicRestricted = v
+		rv = c.isTopicRestricted
+	case Invalid:
+		rv = false
+	}
+	return rv
+}
+
 type IRCCommand struct {
 	minParams        int
 	handler          func(ic *IRCConn, im IRCMessage) error
@@ -343,6 +404,30 @@ func sendMessage(ic *IRCConn, msg string) error {
 		return fmt.Errorf("sendMessage - %w", err)
 	}
 	return nil
+}
+
+func handleChannelModeChange(im IRCMessage, ic *IRCConn, ircCh *IRCChan) error {
+	chanName := im.Params[0]
+	mode := im.Params[1]
+	if userIsChannelOp(ic, ircCh) {
+		mt, v, ok := getModeType(mode)
+		msg := ""
+		if ok {
+			ircCh.setMode(mt, v)
+			msg = fmt.Sprintf(":%s!%s@%s MODE %s %s\r\n", ic.Nick, ic.User, ic.Conn.LocalAddr(), chanName, mode)
+			sendMessageToChannel(ic, msg, ircCh, false)
+		} else {
+			// mode string invalid
+			modeChar := string(mode[1])
+			msg, _ = formatReply(ic, replyMap["ERR_UNKNOWNMODE"], []string{modeChar, chanName})
+		}
+		return sendMessage(ic, msg)
+	} else {
+		// User is not ChanOp - refuse to set mode, send error reply
+		msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
+		fmt.Printf("formatReply returned\n")
+		return sendMessage(ic, msg)
+	}
 }
 
 func main() {
@@ -444,7 +529,6 @@ func handleConnection(ic *IRCConn) {
 	defer func() {
 		ic.Conn.Close()
 
-		// TODO Refactor into cleanup function
 		if !ic.isDeleted {
 			cleanupIC(ic)
 		}
@@ -465,27 +549,9 @@ func handleConnection(ic *IRCConn) {
 			log.Printf("Error extracting message %v", err)
 		}
 
-		incoming_message = strings.Trim(incoming_message, " ")
-		log.Printf("Incoming message: %s", incoming_message)
-		split_message := strings.SplitN(incoming_message, " ", 2)
-
-		if len(split_message) == 0 {
-			continue
-		}
-
-		var prefix string = ""
-		if strings.HasPrefix(split_message[0], ":") {
-			prefix = split_message[0]
-			log.Printf("Prefix %s\n", prefix)
-			split_message = strings.SplitN(strings.Trim(split_message[1], " "), " ", 2)
-		}
-
-		command := split_message[0]
-
-		ircCommand, ok := commandMap[command]
+		ircCommand, ok := commandMap[im.Command]
 		if !ok {
 			log.Println("not ok")
-			//handleDefault(ic, params, command)
 			handleDefault(ic, im)
 			continue
 		}
@@ -494,7 +560,6 @@ func handleConnection(ic *IRCConn) {
 			continue
 		}
 
-		//ircCommand.handler(ic, params)
 		if !validateParameters(im.Command, strings.Join(im.Params, " "), ircCommand.minParams, ic) {
 			continue
 		}
