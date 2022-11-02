@@ -8,17 +8,6 @@ import (
 	"sync"
 )
 
-func userCanSetTopic(ic *IRCConn, ircCh *IRCChan) bool {
-	ircCh.Mtx.Lock()
-	tr := ircCh.isTopicRestricted
-	ircCh.Mtx.Unlock()
-	if tr {
-		return userIsChannelOp(ic, ircCh)
-	}
-
-	return true
-}
-
 func setMemberStatusMode(nick, mode string, ircCh *IRCChan) (int, error) {
 	if ircCh == nil {
 		return -1, fmt.Errorf("setMemberStatusMode - ircCh is nil")
@@ -48,22 +37,6 @@ func setMemberStatusMode(nick, mode string, ircCh *IRCChan) (int, error) {
 	}
 
 	return 0, nil
-}
-
-func userHasVoice(ic *IRCConn, ircCh *IRCChan) bool {
-	ircCh.Mtx.Lock()
-	defer ircCh.Mtx.Unlock()
-	im := ircCh.isModerated
-	ct, ok := ircCh.CanTalk[ic.Nick]
-	return im && (ct && ok)
-
-}
-
-func userIsChannelOp(ic *IRCConn, ircCh *IRCChan) bool {
-	ircCh.Mtx.Lock()
-	defer ircCh.Mtx.Unlock()
-	isOp, ok := ircCh.OpNicks[ic.Nick]
-	return isOp && ok
 }
 
 func setChannelMode(ircCh *IRCChan, mode string) error {
@@ -96,19 +69,6 @@ func setChannelMode(ircCh *IRCChan, mode string) error {
 	defer ircCh.Mtx.Unlock()
 
 	return nil
-}
-
-func getChannelMode(ircCh *IRCChan) (string, error) {
-	ircCh.Mtx.Lock()
-	channelMode := ""
-	if ircCh.isModerated {
-		channelMode += "m"
-	}
-	if ircCh.isTopicRestricted {
-		channelMode += "t"
-	}
-	defer ircCh.Mtx.Unlock()
-	return channelMode, nil
 }
 
 func handleMode(ic *IRCConn, im IRCMessage) error {
@@ -144,16 +104,16 @@ func handleMode(ic *IRCConn, im IRCMessage) error {
 				return sendMessage(ic, msg)
 			}
 			// check if user is in channel
-			ircCh.Mtx.Lock()
-			nickIsChannelMember := false
-			for _, v := range ircCh.Members {
-				if v.Nick == nick {
-					nickIsChannelMember = true
-					break
-				}
-			}
-			ircCh.Mtx.Unlock()
-			if !nickIsChannelMember {
+			//ircCh.Mtx.Lock()
+			////nickIsChannelMember := false
+			////for _, v := range ircCh.Members {
+			////	if v.Nick == nick {
+			////		nickIsChannelMember = true
+			////		break
+			////	}
+			////}
+			//ircCh.Mtx.Unlock()
+			if !ircCh.nickIsMember(nick) {
 				msg, _ := formatReply(ic, replyMap["ERR_USERNOTINCHANNEL"], []string{nick, chanName})
 				return sendMessage(ic, msg)
 			}
@@ -454,12 +414,12 @@ func handlePrivMsg(ic *IRCConn, im IRCMessage) error {
 			return nil
 		}
 
-		memberOfChannel := false
-		for _, v := range getChannelMembers(channel) {
-			if v == ic {
-				memberOfChannel = true
-			}
-		}
+		memberOfChannel := channel.nickIsMember(ic.Nick)
+		//for _, v := range getChannelMembers(channel) {
+		//	if v == ic {
+		//		memberOfChannel = true
+		//	}
+		//}
 
 		if !memberOfChannel {
 			rplName := "ERR_CANNOTSENDTOCHAN"
@@ -644,20 +604,9 @@ func handleTopic(ic *IRCConn, im IRCMessage) error {
 		return nil
 	}
 
-	memberOfChannel := false
-	for _, v := range getChannelMembers(ircCh) {
-		if v == ic {
-			memberOfChannel = true
-		}
-	}
-
-	if !memberOfChannel {
+	if !ircCh.nickIsMember(ic.Nick) {
 		msg, _ := formatReply(ic, replyMap["ERR_NOTONCHANNEL"], []string{chanName})
-		_, err := ic.Conn.Write([]byte(msg))
-		if err != nil {
-			log.Println("error sending ERR_NOTONCHANNEL reply")
-		}
-		return nil
+		return sendMessage(ic, msg)
 	}
 
 	if !userCanSetTopic(ic, ircCh) {
@@ -740,10 +689,7 @@ func sendMessageToChannel(senderIC *IRCConn, msg string, ircCh *IRCChan, sendToS
 
 func addUserToChannel(ic *IRCConn, ircCh *IRCChan) {
 	ircCh.Mtx.Lock()
-	ircCh.Members = append(ircCh.Members, ic)
-	lm := len(ircCh.Members)
-	var members = make([]*IRCConn, lm, lm)
-	copy(members, ircCh.Members)
+	ircCh.Members[ic.Nick] = ic
 	ircCh.Mtx.Unlock()
 	joinMsg := fmt.Sprintf(":%s!%s@%s JOIN %s\r\n", ic.Nick, ic.User, ic.Conn.RemoteAddr(), ircCh.Name)
 	sendMessageToChannel(ic, joinMsg, ircCh, false)
@@ -761,7 +707,7 @@ func newChannel(ic *IRCConn, chanName string) *IRCChan {
 		Topic:   "",
 		OpNicks: make(map[string]bool),
 		CanTalk: make(map[string]bool),
-		Members: []*IRCConn{},
+		Members: make(map[string]*IRCConn),
 	}
 	newChan.OpNicks[ic.Nick] = true
 	newChan.CanTalk[ic.Nick] = true
@@ -820,11 +766,12 @@ func getConnectionChannels(ic *IRCConn) string {
 
 func getChannelMembers(ircCh *IRCChan) []*IRCConn {
 	ircCh.Mtx.Lock()
-	lm := len(ircCh.Members)
-	members := make([]*IRCConn, lm, lm)
-	copy(members, ircCh.Members)
-	ircCh.Mtx.Unlock()
-	return members
+	defer ircCh.Mtx.Unlock()
+	conns := []*IRCConn{}
+	for _, c := range ircCh.Members {
+		conns = append(conns, c)
+	}
+	return conns
 }
 
 func sendNoChannelNamReply(ic *IRCConn, names []string) {
@@ -885,26 +832,15 @@ func sendEndOfNames(ic *IRCConn, chanName string) error {
 }
 
 func handlePart(ic *IRCConn, im IRCMessage) error {
-	params := strings.Join(im.Params, " ")
-	splitParams := strings.SplitN(params, " ", 2) // maybe split on colon?
-	chanName := splitParams[0]
+	chanName := im.Params[0]
 	ircCh, ok := lookupChannelByName(chanName)
 	if !ok {
 		// ERR Channel doesn't exist
 		msg, _ := formatReply(ic, replyMap["ERR_NOSUCHCHANNEL"], []string{chanName})
-		_, err := ic.Conn.Write([]byte(msg))
-		if err != nil {
-			log.Println("error sending nosuchnick reply")
-		}
-		return nil
+		return sendMessage(ic, msg)
 	}
 
-	memberOfChannel := false
-	for _, v := range getChannelMembers(ircCh) {
-		if v == ic {
-			memberOfChannel = true
-		}
-	}
+	memberOfChannel := ircCh.nickIsMember(ic.Nick)
 
 	if !memberOfChannel {
 		msg, _ := formatReply(ic, replyMap["ERR_NOTONCHANNEL"], []string{chanName})
@@ -916,8 +852,8 @@ func handlePart(ic *IRCConn, im IRCMessage) error {
 	}
 
 	msg := ""
-	if len(splitParams) == 2 {
-		msg = fmt.Sprintf(":%s!%s@%s PART %s :%s\r\n", ic.Nick, ic.User, ic.Conn.RemoteAddr(), chanName, removePrefix(splitParams[1]))
+	if len(im.Params) == 2 {
+		msg = fmt.Sprintf(":%s!%s@%s PART %s :%s\r\n", ic.Nick, ic.User, ic.Conn.RemoteAddr(), chanName, removePrefix(im.Params[1]))
 	} else {
 		msg = fmt.Sprintf(":%s!%s@%s PART %s\r\n", ic.Nick, ic.User, ic.Conn.RemoteAddr(), chanName)
 	}
@@ -927,15 +863,7 @@ func handlePart(ic *IRCConn, im IRCMessage) error {
 	numChannelMembers := 0
 	// Remove user from channel
 	ircCh.Mtx.Lock()
-	memberIndex := 0
-	for i, v := range ircCh.Members {
-		if v == ic {
-			memberIndex = i
-			break
-		}
-	}
-	ircCh.Members[memberIndex] = ircCh.Members[len(ircCh.Members)-1]
-	ircCh.Members = ircCh.Members[:len(ircCh.Members)-1]
+	delete(ircCh.Members, ic.Nick)
 
 	if ircCh.OpNicks[ic.Nick] {
 		delete(ircCh.OpNicks, ic.Nick)
@@ -974,11 +902,8 @@ func handleJoin(ic *IRCConn, im IRCMessage) error {
 		ircCh = newChannel(ic, chanName)
 	}
 
-	members := getChannelMembers(ircCh)
-	for _, v := range members {
-		if v == ic {
-			return nil
-		}
+	if ircCh.nickIsMember(ic.Nick) {
+		return nil
 	}
 	// Join channel
 	addUserToChannel(ic, ircCh)
