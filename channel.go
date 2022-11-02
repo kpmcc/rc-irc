@@ -1,6 +1,10 @@
 package main
 
-import "sync"
+import (
+	"fmt"
+	"os"
+	"sync"
+)
 
 type IRCChan struct {
 	Mtx     sync.Mutex
@@ -70,6 +74,27 @@ func (c *IRCChan) isMember(ic *IRCConn) bool {
 		}
 	}
 	return false
+}
+
+func (c *IRCChan) nickCanSendPM(nick string) bool {
+	fmt.Fprintln(os.Stderr, "nickCanSendPM")
+	if c.nickIsMember(nick) {
+		fmt.Fprintln(os.Stderr, "nickIsMember")
+		if c.isModerated {
+			fmt.Fprintln(os.Stderr, "isModerated")
+			c.Mtx.Lock()
+			senderCanTalk, ok := c.CanTalk[nick]
+			senderIsChanOp, opOk := c.OpNicks[nick]
+			c.Mtx.Unlock()
+			fmt.Fprintf(os.Stderr, "cantalk: %t ok: %t\n", senderCanTalk, ok)
+			canPM := (senderCanTalk && ok) || (senderIsChanOp && opOk)
+			return canPM
+		} else {
+			return true
+		}
+	} else {
+		return false
+	}
 }
 
 type ModeType uint8

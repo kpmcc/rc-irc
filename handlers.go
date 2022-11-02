@@ -391,6 +391,32 @@ func handlePong(ic *IRCConn, im IRCMessage) error {
 	return nil
 }
 
+func handleChannelPrivMsg(ic *IRCConn, im IRCMessage, ircCh *IRCChan) error {
+	target := im.Params[0]
+
+	if ircCh.nickCanSendPM(ic.Nick) {
+		msg := fmt.Sprintf(
+			":%s!%s@%s PRIVMSG %s :%s\r\n",
+			ic.Nick, ic.User, ic.Conn.RemoteAddr(), target, im.Params[1])
+		if len(msg) > 512 {
+			msg = msg[:510] + "\r\n"
+		}
+
+		fmt.Printf("sending message to channel: %s", msg)
+		return sendMessageToChannel(ic, msg, ircCh, false)
+
+	} else {
+		rplName := "ERR_CANNOTSENDTOCHAN"
+		msg, _ := formatReply(ic, replyMap[rplName], []string{target})
+		err := sendMessage(ic, msg)
+		if err != nil {
+			return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
+		}
+		return nil
+	}
+
+}
+
 func handlePrivMsg(ic *IRCConn, im IRCMessage) error {
 	params := strings.Join(im.Params, " ")
 
@@ -414,49 +440,8 @@ func handlePrivMsg(ic *IRCConn, im IRCMessage) error {
 			return nil
 		}
 
-		memberOfChannel := channel.nickIsMember(ic.Nick)
-		//for _, v := range getChannelMembers(channel) {
-		//	if v == ic {
-		//		memberOfChannel = true
-		//	}
-		//}
+		return handleChannelPrivMsg(ic, im, channel)
 
-		if !memberOfChannel {
-			rplName := "ERR_CANNOTSENDTOCHAN"
-			msg, _ := formatReply(ic, replyMap[rplName], []string{target})
-			err := sendMessage(ic, msg)
-			if err != nil {
-				return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
-			}
-			return nil
-		}
-
-		if channel.isModerated {
-			fmt.Println("in channel isModerated block")
-			channel.Mtx.Lock()
-			senderCanTalk, ok := channel.CanTalk[ic.Nick]
-			channel.Mtx.Unlock()
-
-			if !(senderCanTalk && ok) {
-				fmt.Println("!senderCanTalk && ok")
-				rplName := "ERR_CANNOTSENDTOCHAN"
-				msg, _ := formatReply(ic, replyMap[rplName], []string{target})
-				err := sendMessage(ic, msg)
-				if err != nil {
-					return fmt.Errorf("handlePrivMsg - writing %s - %w", rplName, err)
-				}
-			}
-		}
-
-		msg := fmt.Sprintf(
-			":%s!%s@%s PRIVMSG %s :%s\r\n",
-			ic.Nick, ic.User, ic.Conn.RemoteAddr(), target, userMessage)
-		if len(msg) > 512 {
-			msg = msg[:510] + "\r\n"
-		}
-
-		fmt.Printf("sending message to channel: %s", msg)
-		sendMessageToChannel(ic, msg, channel, false)
 	} else {
 		// USER TO USER PM
 
@@ -671,7 +656,7 @@ func lookupChannelByName(name string) (*IRCChan, bool) {
 	return ircCh, ok
 }
 
-func sendMessageToChannel(senderIC *IRCConn, msg string, ircCh *IRCChan, sendToSelf bool) {
+func sendMessageToChannel(senderIC *IRCConn, msg string, ircCh *IRCChan, sendToSelf bool) error {
 	members := getChannelMembers(ircCh)
 	for _, v := range members {
 		v := v
@@ -680,11 +665,12 @@ func sendMessageToChannel(senderIC *IRCConn, msg string, ircCh *IRCChan, sendToS
 				_, err := v.Conn.Write([]byte(msg))
 
 				if err != nil {
-					log.Fatal(err)
+					log.Fatalf("sendMessageToChannel - %q", err)
 				}
 			}()
 		}
 	}
+	return nil
 }
 
 func addUserToChannel(ic *IRCConn, ircCh *IRCChan) {
