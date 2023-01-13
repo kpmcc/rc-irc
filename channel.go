@@ -54,6 +54,17 @@ func userIsOp(ic *IRCConn) bool {
 	return isOp
 }
 
+func makeOp(ic *IRCConn) error {
+	connsMtx.Lock()
+	defer connsMtx.Unlock()
+	if ic != nil {
+		ic.isOperator = true
+		return nil
+	} else {
+		return fmt.Errorf("makeOp - ic is Nil")
+	}
+}
+
 func getChannelMode(ircCh *IRCChan) (string, error) {
 	ircCh.Mtx.Lock()
 	channelMode := ""
@@ -99,9 +110,7 @@ func (c *IRCChan) nickCanSendPM(nick string) bool {
 				log.Printf("nickCanSendPM: nick to conn lookup failed for %s", nick)
 				return false
 			}
-			connsMtx.Lock()
-			defer connsMtx.Unlock()
-			icIsOp := ic.isOperator
+			icIsOp := userIsOp(ic)
 
 			fmt.Fprintf(os.Stderr, "cantalk: %t ok: %t op: %t\n", senderCanTalk, ok, icIsOp)
 			canPM := (senderCanTalk && ok) || (senderIsChanOp && opOk) || icIsOp

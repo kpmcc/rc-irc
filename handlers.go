@@ -1033,9 +1033,10 @@ func handleOper(ic *IRCConn, im IRCMessage) error {
 	pw := im.Params[1]
 	msg := ""
 	if pw == *operatorPassword {
-		connsMtx.Lock()
-		defer connsMtx.Unlock()
-		ic.isOperator = true
+		err := makeOp(ic)
+		if err != nil {
+			return fmt.Errorf("handleOper - %w", err)
+		}
 		msg, _ = formatReply(ic, replyMap["RPL_YOUREOPER"], []string{})
 	} else {
 		msg, _ = formatReply(ic, replyMap["ERR_PASSWDMISMATCH"], []string{})
