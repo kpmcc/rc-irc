@@ -133,6 +133,12 @@ var (
 			disableAutoReply: false,
 			welcomeRequired:  true,
 		},
+		"OPER": {
+			handler:          handleOper,
+			minParams:        2,
+			disableAutoReply: false,
+			welcomeRequired:  true,
+		},
 	}
 	replyMap = map[string]*IRCReply{
 		"ERR_NOSUCHNICK": {
@@ -272,6 +278,18 @@ var (
 			FormatText:   ":Cannot change mode for other users",
 			UseGenerator: false,
 		},
+		"RPL_YOUREOPER": {
+			NumParams:    0,
+			Code:         381,
+			FormatText:   ":You are now an IRC operator",
+			UseGenerator: false,
+		},
+		"ERR_PASSWDMISMATCH": {
+			NumParams:    0,
+			Code:         464,
+			FormatText:   ":Password incorrect",
+			UseGenerator: false,
+		},
 	}
 )
 
@@ -326,7 +344,7 @@ func sendMessage(ic *IRCConn, msg string) error {
 func handleChannelModeChange(im IRCMessage, ic *IRCConn, ircCh *IRCChan) error {
 	chanName := im.Params[0]
 	mode := im.Params[1]
-	if userIsChannelOp(ic, ircCh) {
+	if userIsChannelOp(ic, ircCh) || userIsOp(ic) {
 		mt, v, ok := getModeType(mode)
 		msg := ""
 		if ok {
@@ -468,7 +486,7 @@ func handleConnection(ic *IRCConn) {
 
 		ircCommand, ok := commandMap[im.Command]
 		if !ok {
-			log.Println("not ok")
+			log.Println("Could not match command in commandMap - using default handler")
 			handleDefault(ic, im)
 			continue
 		}

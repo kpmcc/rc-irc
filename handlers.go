@@ -99,7 +99,7 @@ func handleMode(ic *IRCConn, im IRCMessage) error {
 			mode := im.Params[1]
 			nick := im.Params[2]
 			// TODO check that sender can set modes
-			if !userIsChannelOp(ic, ircCh) {
+			if !(userIsChannelOp(ic, ircCh) || userIsOp(ic)) {
 				msg, _ := formatReply(ic, replyMap["ERR_CHANOPRIVSNEEDED"], []string{chanName})
 				return sendMessage(ic, msg)
 			}
@@ -1023,5 +1023,24 @@ func handleNames(ic *IRCConn, im IRCMessage) error {
 		// unsupported
 
 	}
+	return nil
+}
+
+func handleOper(ic *IRCConn, im IRCMessage) error {
+	if len(im.Params) != 2 {
+		return fmt.Errorf("handleOper - Expected 2 params, got %d", len(im.Params))
+	}
+	pw := im.Params[1]
+	msg := ""
+	if pw == *operatorPassword {
+		connsMtx.Lock()
+		defer connsMtx.Unlock()
+		ic.isOperator = true
+		msg, _ = formatReply(ic, replyMap["RPL_YOUREOPER"], []string{})
+	} else {
+		msg, _ = formatReply(ic, replyMap["ERR_PASSWDMISMATCH"], []string{})
+	}
+
+	sendMessage(ic, msg)
 	return nil
 }

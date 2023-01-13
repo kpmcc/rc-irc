@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"sync"
 )
@@ -23,7 +24,8 @@ func userCanSetTopic(ic *IRCConn, ircCh *IRCChan) bool {
 	tr := ircCh.isTopicRestricted
 	ircCh.Mtx.Unlock()
 	if tr {
-		return userIsChannelOp(ic, ircCh)
+		likeOp := userIsChannelOp(ic, ircCh) || userIsOp(ic)
+		return likeOp
 	}
 
 	return true
@@ -43,6 +45,13 @@ func userIsChannelOp(ic *IRCConn, ircCh *IRCChan) bool {
 	defer ircCh.Mtx.Unlock()
 	isOp, ok := ircCh.OpNicks[ic.Nick]
 	return isOp && ok
+}
+
+func userIsOp(ic *IRCConn) bool {
+	connsMtx.Lock()
+	defer connsMtx.Unlock()
+	isOp := ic.isOperator
+	return isOp
 }
 
 func getChannelMode(ircCh *IRCChan) (string, error) {
@@ -77,7 +86,6 @@ func (c *IRCChan) isMember(ic *IRCConn) bool {
 }
 
 func (c *IRCChan) nickCanSendPM(nick string) bool {
-	fmt.Fprintln(os.Stderr, "nickCanSendPM")
 	if c.nickIsMember(nick) {
 		fmt.Fprintln(os.Stderr, "nickIsMember")
 		if c.isModerated {
@@ -86,8 +94,17 @@ func (c *IRCChan) nickCanSendPM(nick string) bool {
 			senderCanTalk, ok := c.CanTalk[nick]
 			senderIsChanOp, opOk := c.OpNicks[nick]
 			c.Mtx.Unlock()
-			fmt.Fprintf(os.Stderr, "cantalk: %t ok: %t\n", senderCanTalk, ok)
-			canPM := (senderCanTalk && ok) || (senderIsChanOp && opOk)
+			ic, ok := lookupNickConn(nick)
+			if !ok {
+				log.Printf("nickCanSendPM: nick to conn lookup failed for %s", nick)
+				return false
+			}
+			connsMtx.Lock()
+			defer connsMtx.Unlock()
+			icIsOp := ic.isOperator
+
+			fmt.Fprintf(os.Stderr, "cantalk: %t ok: %t op: %t\n", senderCanTalk, ok, icIsOp)
+			canPM := (senderCanTalk && ok) || (senderIsChanOp && opOk) || icIsOp
 			return canPM
 		} else {
 			return true
