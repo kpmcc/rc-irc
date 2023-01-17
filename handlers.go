@@ -973,44 +973,51 @@ func checkAndSendWelcome(ic *IRCConn) {
 	}
 }
 
+// Caution: Side effects! - This modifies m
+func excludeFromMap(m map[*IRCConn]bool, t []*IRCConn) map[*IRCConn]bool {
+	for _, c := range t {
+		_, ok := m[c]
+		if ok {
+			delete(m, c)
+		}
+	}
+	return m
+}
+
 func handleNames(ic *IRCConn, im IRCMessage) error {
 	l := len(im.Params)
 	if l == 0 {
-		// list all channels
-		connsMtx.Lock()
-		var conns = make([]*IRCConn, len(ircConns))
-		copy(conns, ircConns)
-		connsMtx.Unlock()
-		m := make(map[*IRCConn]bool)
-		for _, c := range conns {
-			log.Printf("adding %s to conns map\n", c.Nick)
-			m[c] = true
-		}
-
-		allMembers := []*IRCConn{}
+		connsWithChannels := []*IRCConn{}
 		chansMtx.Lock()
 		for _, c := range ircChans {
 			sendNamReply(ic, c)
 			chanMembers := getChannelMembers(c)
 			for _, m := range chanMembers {
-				allMembers = append(allMembers, m)
+				connsWithChannels = append(connsWithChannels, m)
 			}
 		}
 		chansMtx.Unlock()
 
-		for _, c := range allMembers {
-			_, ok := m[c]
-			if ok {
-				delete(m, c)
-				log.Printf("removing %s from conns map\n", c.Nick)
-			}
+		connsMtx.Lock()
+		var conns = make([]*IRCConn, len(ircConns))
+		copy(conns, ircConns)
+		connsMtx.Unlock()
+
+		connsMap := make(map[*IRCConn]bool)
+		for _, c := range conns {
+			log.Printf("adding %s to conns map\n", c.Nick)
+			connsMap[c] = true
 		}
-		log.Printf("%d connections without channels", len(m))
-		var channelLessConns = []string{}
-		for c, _ := range m {
-			channelLessConns = append(channelLessConns, c.Nick)
+
+		channellessConns := excludeFromMap(connsMap, connsWithChannels)
+
+		log.Printf("%d connections without channels", len(channellessConns))
+
+		var channellessConnNicks = []string{}
+		for c, _ := range channellessConns {
+			channellessConnNicks = append(channellessConnNicks, c.Nick)
 		}
-		sendNoChannelNamReply(ic, channelLessConns)
+		sendNoChannelNamReply(ic, channellessConnNicks)
 	} else if l == 1 {
 		// list names on channel
 		chanName := im.Params[0]
