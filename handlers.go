@@ -402,7 +402,7 @@ func handleChannelPrivMsg(ic *IRCConn, im IRCMessage, ircCh *IRCChan) error {
 			msg = msg[:510] + "\r\n"
 		}
 
-		fmt.Printf("sending message to channel: %s", msg)
+		//fmt.Printf("sending message to channel: %s", msg)
 		return sendMessageToChannel(ic, msg, ircCh, false)
 
 	} else {
@@ -735,7 +735,7 @@ func getConnectionChannels(ic *IRCConn) string {
 
 		mem := c.isMember(ic)
 		op := userIsChannelOp(ic, c)
-		v := userHasVoice(ic, c)
+		v := c.chanIsModerated() && userHasVoice(ic, c)
 		if mem {
 			if op {
 				memberChannels += "@"
@@ -762,7 +762,7 @@ func getChannelMembers(ircCh *IRCChan) []*IRCConn {
 
 func sendNoChannelNamReply(ic *IRCConn, names []string) {
 	var sb strings.Builder
-	channelStatusIndicator := "=" // Using public indicator as default
+	channelStatusIndicator := "*" // Using public indicator as default
 	sb.WriteString(fmt.Sprintf(":%s %03d %s %s %s :", ic.Conn.LocalAddr(), 353, ic.Nick,
 		channelStatusIndicator, "*"))
 	members := names
@@ -775,7 +775,7 @@ func sendNoChannelNamReply(ic *IRCConn, names []string) {
 	}
 	sb.WriteString("\r\n")
 	// Send RPL_NAMREPLY
-	_, err := ic.Conn.Write([]byte(sb.String()))
+	err := sendMessage(ic, sb.String())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -786,23 +786,44 @@ func sendNamReply(ic *IRCConn, ircCh *IRCChan) {
 	channelStatusIndicator := "=" // Using public indicator as default
 	sb.WriteString(fmt.Sprintf(":%s %03d %s %s %s :", ic.Conn.LocalAddr(), 353, ic.Nick,
 		channelStatusIndicator, ircCh.Name))
+
+	//fmt.Printf("Sending name reply for channel %s\n", ircCh.Name)
+	ircCh.printChannel()
+
 	members := getChannelMembers(ircCh)
-	for i, v := range members {
-		n := v.Nick
+	for i, m := range members {
+		n := m.Nick
+		//fmt.Printf("adding nick %s to list\n", n)
 		if i != 0 {
 			sb.WriteString(" ")
 		}
-		present, ok := ircCh.OpNicks[n]
-		if present && ok {
-			// append "@" to indicate channel member is op
-			sb.WriteString("@")
+		userConn, ok := lookupNickConn(n)
+		if ok {
+			//fmt.Printf("IN OK\n")
+			if userIsChannelOp(userConn, ircCh) {
+				//fmt.Printf("nick %s is chanOp\n", n)
+				sb.WriteString("@")
+			} else {
+				//fmt.Printf("IN ELSE\n")
+				if userHasVoice(userConn, ircCh) {
+					//fmt.Printf("nick %s has voice\n", n)
+					sb.WriteString("+")
+				}
+				fmt.Printf("OUT ELSE\n")
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Could not find connection for nick: %s\n", n)
 		}
+
+		//user, ok := ircCh.OpNicks[n]
+		//if present && ok {
+		//}
 		// append channel member nick
 		sb.WriteString(n)
 	}
 	sb.WriteString("\r\n")
 	// Send RPL_NAMREPLY
-	_, err := ic.Conn.Write([]byte(sb.String()))
+	err := sendMessage(ic, sb.String())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1011,13 +1032,16 @@ func handleNames(ic *IRCConn, im IRCMessage) error {
 
 		channellessConns := excludeFromMap(connsMap, connsWithChannels)
 
-		log.Printf("%d connections without channels", len(channellessConns))
+		if len(channellessConns) > 0 {
+			log.Printf("%d connections without channels", len(channellessConns))
 
-		var channellessConnNicks = []string{}
-		for c, _ := range channellessConns {
-			channellessConnNicks = append(channellessConnNicks, c.Nick)
+			var channellessConnNicks = []string{}
+			for c, _ := range channellessConns {
+				channellessConnNicks = append(channellessConnNicks, c.Nick)
+			}
+			sendNoChannelNamReply(ic, channellessConnNicks)
 		}
-		sendNoChannelNamReply(ic, channellessConnNicks)
+		sendEndOfNames(ic, "*")
 	} else if l == 1 {
 		// list names on channel
 		chanName := im.Params[0]
@@ -1025,10 +1049,10 @@ func handleNames(ic *IRCConn, im IRCMessage) error {
 		if ok {
 			sendNamReply(ic, ircCh)
 		}
+		sendEndOfNames(ic, chanName)
 
 	} else {
 		// unsupported
-
 	}
 	return nil
 }

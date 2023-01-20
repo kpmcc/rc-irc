@@ -19,6 +19,30 @@ type IRCChan struct {
 	isTopicRestricted bool
 }
 
+func (ircCh *IRCChan) printChannel() {
+	ircCh.Mtx.Lock()
+	defer ircCh.Mtx.Unlock()
+	fmt.Printf("Channel %s\n", ircCh.Name)
+	fmt.Printf("Topic: %s\n", ircCh.Topic)
+	fmt.Printf("Moderated: %t\n", ircCh.isModerated)
+	fmt.Printf("Topic Restricted: %t\n", ircCh.isTopicRestricted)
+	fmt.Printf("Members:\n")
+	for n, _ := range ircCh.Members {
+		fmt.Printf("\t-%s\n", n)
+	}
+
+	fmt.Printf("OpNicks:\n")
+	for n, _ := range ircCh.OpNicks {
+		fmt.Printf("\t-%s\n", n)
+	}
+
+	fmt.Printf("CanTalk:\n")
+	for n, _ := range ircCh.CanTalk {
+		fmt.Printf("\t-%s\n", n)
+	}
+
+}
+
 func userCanSetTopic(ic *IRCConn, ircCh *IRCChan) bool {
 	ircCh.Mtx.Lock()
 	tr := ircCh.isTopicRestricted
@@ -31,13 +55,18 @@ func userCanSetTopic(ic *IRCConn, ircCh *IRCChan) bool {
 	return true
 }
 
-func userHasVoice(ic *IRCConn, ircCh *IRCChan) bool {
+func (ircCh *IRCChan) chanIsModerated() bool {
 	ircCh.Mtx.Lock()
 	defer ircCh.Mtx.Unlock()
 	im := ircCh.isModerated
-	ct, ok := ircCh.CanTalk[ic.Nick]
-	return im && (ct && ok)
+	return im
+}
 
+func userHasVoice(ic *IRCConn, ircCh *IRCChan) bool {
+	ircCh.Mtx.Lock()
+	defer ircCh.Mtx.Unlock()
+	ct, ok := ircCh.CanTalk[ic.Nick]
+	return ct && ok
 }
 
 func userIsChannelOp(ic *IRCConn, ircCh *IRCChan) bool {

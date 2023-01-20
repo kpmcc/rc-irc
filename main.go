@@ -327,6 +327,7 @@ type IRCMessage struct {
 }
 
 func sendMessage(ic *IRCConn, msg string) error {
+	fmt.Printf("sending message: %s\n", msg)
 	if ic == nil {
 		return fmt.Errorf("sendMessage - ic is nil")
 	}
