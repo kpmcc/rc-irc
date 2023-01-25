@@ -1076,3 +1076,61 @@ func handleOper(ic *IRCConn, im IRCMessage) error {
 	sendMessage(ic, msg)
 	return nil
 }
+
+func handleWho(ic *IRCConn, im IRCMessage) error {
+	fmt.Println("handling Who")
+	pl := len(im.Params)
+	if pl == 0 {
+		// No mask specified
+	} else if pl == 1 {
+		// Channel mask specified
+		chanName := im.Params[0]
+		fmt.Printf("got channel mask: %s\n", chanName)
+		ircCh, ok := lookupChannelByName(chanName)
+		if ok {
+			fmt.Println("found channel")
+			// Send who reply for each person on channel
+			members := getChannelMembers(ircCh)
+			hopCount := "0"
+
+			for _, m := range members {
+				mFlags := ""
+				if m.isAway {
+					mFlags += "G"
+				} else {
+					mFlags += "H"
+				}
+				if userIsOp(m) {
+					mFlags += "*"
+				}
+				if userIsChannelOp(m, ircCh) {
+					mFlags += "@"
+				} else if userHasVoice(m, ircCh) {
+					mFlags += "+"
+				}
+				msg, _ := formatReply(ic, replyMap["RPL_WHOREPLY"], []string{
+					chanName, m.User, m.Conn.RemoteAddr().Network(),
+					m.Conn.LocalAddr().Network(), m.Nick, mFlags,
+					hopCount, m.RealName})
+				fmt.Printf("formatted reply: %s\n", msg)
+
+				err := sendMessage(ic, msg)
+				if err != nil {
+					return fmt.Errorf("handleWho - %w", err)
+				}
+			}
+			msg, _ := formatReply(ic, replyMap["RPL_ENDOFWHO"], []string{chanName})
+			err := sendMessage(ic, msg)
+			if err != nil {
+				return fmt.Errorf("handleWho - %w", err)
+			}
+
+		} else {
+			// Could not find channel with given name
+			return fmt.Errorf("could not find requestd channel %s", im.Params[0])
+		}
+	} else {
+		// 'o': unsupported
+	}
+	return nil
+}

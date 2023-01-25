@@ -139,6 +139,12 @@ var (
 			disableAutoReply: false,
 			welcomeRequired:  true,
 		},
+		"WHO": {
+			handler:          handleWho,
+			minParams:        0,
+			disableAutoReply: false,
+			welcomeRequired:  true,
+		},
 	}
 	replyMap = map[string]*IRCReply{
 		"ERR_NOSUCHNICK": {
@@ -289,6 +295,25 @@ var (
 			Code:         464,
 			FormatText:   ":Password incorrect",
 			UseGenerator: false,
+		},
+		"RPL_WHOREPLY": {
+			NumParams:    8,
+			Code:         352,
+			FormatText:   "%s %s %s %s %s %s :%s %s",
+			UseGenerator: true,
+			Generator: func(r *IRCReply, p []string) string {
+				return fmt.Sprintf(r.FormatText, p[0], p[1], p[2], p[3], p[4],
+					p[5], p[6], p[7])
+			},
+		},
+		"RPL_ENDOFWHO": {
+			NumParams:    1,
+			Code:         315,
+			FormatText:   "%s :End of WHO list",
+			UseGenerator: true,
+			Generator: func(r *IRCReply, p []string) string {
+				return fmt.Sprintf(r.FormatText, p[0])
+			},
 		},
 	}
 )
