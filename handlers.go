@@ -251,7 +251,7 @@ func handleWhoIs(ic *IRCConn, im IRCMessage) error {
 		return nil
 	}
 
-	channelList := getConnectionChannels(targetIc)
+	channelList := getConnectionChannelsString(targetIc)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(":%s 311 %s %s %s %s * :%s\r\n",
@@ -637,8 +637,10 @@ func handleAway(ic *IRCConn, im IRCMessage) error {
 	if awayMessage == "" {
 		// clear away message
 		ic.AwayMessage = ""
+		ic.isAway = false
 		msg = fmt.Sprintf(":%s 305 %s :You are no longer marked as being away\r\n", ic.Conn.LocalAddr(), ic.Nick)
 	} else {
+		ic.isAway = true
 		ic.AwayMessage = awayMessage
 		msg = fmt.Sprintf(":%s 306 %s :You have been marked as being away\r\n", ic.Conn.LocalAddr(), ic.Nick)
 	}
@@ -725,29 +727,39 @@ func sendTopicReply(ic *IRCConn, ircCh *IRCChan) {
 	}
 }
 
-func getConnectionChannels(ic *IRCConn) string {
+func getConnectionChannelsString(ic *IRCConn) string {
 	memberChannels := ""
+	connChans := getConnectionChannels(ic)
 	chansMtx.Lock()
-	for _, c := range ircChans {
+	for _, c := range connChans {
 		// isMember locks the corresponding channel's mutex
 		// this should be okay b/c the ordering of mutex acquisition is
 		// always chansMtx, then channel specific mtx
 
-		mem := c.isMember(ic)
 		op := userIsChannelOp(ic, c)
 		v := c.chanIsModerated() && userHasVoice(ic, c)
-		if mem {
-			if op {
-				memberChannels += "@"
-			}
-			if v {
-				memberChannels += "+"
-			}
-			memberChannels += c.Name + " "
+		if op {
+			memberChannels += "@"
 		}
+		if v {
+			memberChannels += "+"
+		}
+		memberChannels += c.Name + " "
 	}
 	defer chansMtx.Unlock()
 	return memberChannels
+}
+
+func getConnectionChannels(ic *IRCConn) []*IRCChan {
+	connChans := []*IRCChan{}
+	chansMtx.Lock()
+	for _, c := range ircChans {
+		if c.isMember(ic) {
+			connChans = append(connChans, c)
+		}
+	}
+	chansMtx.Unlock()
+	return connChans
 }
 
 func getChannelMembers(ircCh *IRCChan) []*IRCConn {
@@ -1077,11 +1089,128 @@ func handleOper(ic *IRCConn, im IRCMessage) error {
 	return nil
 }
 
+func handleChannelWho(ic *IRCConn, ircCh *IRCChan, chanName string) error {
+	// Send who reply for each person on channel
+	members := getChannelMembers(ircCh)
+	hopCount := "0"
+
+	for _, m := range members {
+		mFlags := ""
+		if m.isAway {
+			mFlags += "G"
+		} else {
+			mFlags += "H"
+		}
+		if userIsOp(m) {
+			mFlags += "*"
+		}
+		if userIsChannelOp(m, ircCh) {
+			mFlags += "@"
+		} else if userHasVoice(m, ircCh) {
+			mFlags += "+"
+		}
+		msg, _ := formatReply(ic, replyMap["RPL_WHOREPLY"], []string{
+			chanName, m.User, m.Conn.RemoteAddr().Network(),
+			m.Conn.LocalAddr().Network(), m.Nick, mFlags,
+			hopCount, m.RealName})
+		fmt.Printf("formatted reply: %s\n", msg)
+
+		err := sendMessage(ic, msg)
+		if err != nil {
+			return fmt.Errorf("handleWho - %w", err)
+		}
+	}
+	msg, _ := formatReply(ic, replyMap["RPL_ENDOFWHO"], []string{chanName})
+	err := sendMessage(ic, msg)
+	if err != nil {
+		return fmt.Errorf("handleWho - %w", err)
+	}
+	return nil
+}
+
+func handleWhoElse(ic *IRCConn) error {
+	// No mask specified
+	connsMtx.Lock()
+	membersWithoutCommonChannels := make(map[*IRCConn]bool)
+	for _, c := range ircConns {
+		membersWithoutCommonChannels[c] = true
+	}
+
+	connsMtx.Unlock()
+
+	connChans := getConnectionChannels(ic)
+	for _, ch := range connChans {
+		chanMembers := getChannelMembers(ch)
+		for _, m := range chanMembers {
+			delete(membersWithoutCommonChannels, m)
+		}
+	}
+	//fmt.Printf("connChans len: %d\n", len(connChans))
+	//chansMtx.Lock()
+	//allChans := make([]*IRCChan, len(ircChans))
+	//copied := copy(allChans, ircChans)
+	//if copied != len(ircChans) {
+	//	return fmt.Errorf("handleWhoElse - unable to copy")
+	//}
+	//chansWithoutConn := make(map[*IRCChan]bool)
+	//// add all chans to map
+	//for _, c := range allChans {
+	//	chansWithoutConn[c] = true
+	//}
+	//fmt.Printf("chansWithoutConns before len: %d\n", len(chansWithoutConn))
+
+	//// remove all chans that the sender is on from the map
+	//for _, c := range connChans {
+	//	delete(chansWithoutConn, c)
+	//}
+
+	//fmt.Printf("chansWithoutConns after len: %d\n", len(chansWithoutConn))
+
+	//membersWithoutCommonChannels := make(map[*IRCConn]bool)
+	//for ch, _ := range chansWithoutConn {
+	//	chanMembers := getChannelMembers(ch)
+	//	for _, m := range chanMembers {
+	//		membersWithoutCommonChannels[m] = true
+	//	}
+	//}
+	//chansMtx.Unlock()
+	//fmt.Printf("membersWithoutCommonChannels len: %d\n", len(membersWithoutCommonChannels))
+
+	for m, _ := range membersWithoutCommonChannels {
+		hopCount := "0"
+		mFlags := ""
+		if m.isAway {
+			mFlags += "G"
+		} else {
+			mFlags += "H"
+		}
+		if userIsOp(m) {
+			mFlags += "*"
+		}
+		msg, _ := formatReply(ic, replyMap["RPL_WHOREPLY"], []string{
+			"*", m.User, m.Conn.RemoteAddr().Network(), m.Conn.LocalAddr().Network(),
+			m.Nick, mFlags, hopCount, m.RealName})
+
+		fmt.Printf("formatted reply: %s\n", msg)
+		err := sendMessage(ic, msg)
+		if err != nil {
+			return fmt.Errorf("handleWho - %w", err)
+		}
+	}
+
+	msg, _ := formatReply(ic, replyMap["RPL_ENDOFWHO"], []string{"*"})
+	err := sendMessage(ic, msg)
+	if err != nil {
+		return fmt.Errorf("handleWho - %w", err)
+	}
+	return nil
+}
+
 func handleWho(ic *IRCConn, im IRCMessage) error {
 	fmt.Println("handling Who")
 	pl := len(im.Params)
 	if pl == 0 {
-		// No mask specified
+		return handleWhoElse(ic)
 	} else if pl == 1 {
 		// Channel mask specified
 		chanName := im.Params[0]
@@ -1089,43 +1218,11 @@ func handleWho(ic *IRCConn, im IRCMessage) error {
 		ircCh, ok := lookupChannelByName(chanName)
 		if ok {
 			fmt.Println("found channel")
-			// Send who reply for each person on channel
-			members := getChannelMembers(ircCh)
-			hopCount := "0"
-
-			for _, m := range members {
-				mFlags := ""
-				if m.isAway {
-					mFlags += "G"
-				} else {
-					mFlags += "H"
-				}
-				if userIsOp(m) {
-					mFlags += "*"
-				}
-				if userIsChannelOp(m, ircCh) {
-					mFlags += "@"
-				} else if userHasVoice(m, ircCh) {
-					mFlags += "+"
-				}
-				msg, _ := formatReply(ic, replyMap["RPL_WHOREPLY"], []string{
-					chanName, m.User, m.Conn.RemoteAddr().Network(),
-					m.Conn.LocalAddr().Network(), m.Nick, mFlags,
-					hopCount, m.RealName})
-				fmt.Printf("formatted reply: %s\n", msg)
-
-				err := sendMessage(ic, msg)
-				if err != nil {
-					return fmt.Errorf("handleWho - %w", err)
-				}
-			}
-			msg, _ := formatReply(ic, replyMap["RPL_ENDOFWHO"], []string{chanName})
-			err := sendMessage(ic, msg)
-			if err != nil {
-				return fmt.Errorf("handleWho - %w", err)
-			}
-
+			handleChannelWho(ic, ircCh, chanName)
 		} else {
+			if im.Params[0] == "*" || im.Params[0] == "0" {
+				return handleWhoElse(ic)
+			}
 			// Could not find channel with given name
 			return fmt.Errorf("could not find requestd channel %s", im.Params[0])
 		}
